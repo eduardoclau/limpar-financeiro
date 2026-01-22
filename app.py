@@ -5,43 +5,57 @@ from pathlib import Path
 from PyPDF2 import PdfMerger
 import tempfile
 
-st.set_page_config(page_title="Unificação de Cobranças", layout="wide")
+# -------------------------------------------------
+# CONFIGURAÇÃO STREAMLIT
+# -------------------------------------------------
+st.set_page_config(
+    page_title="Centralização de Documentos – Contas a Receber",
+    layout="wide"
+)
 
-st.title("📑 Unificação de PDFs – Contas a Receber")
+st.title("📑 Centralização e Unificação de Documentos")
 
 st.markdown("""
-Este app:
+Este aplicativo:
 - Lê a planilha de Contas a Receber do ERP  
-- Agrupa clientes por **Telefone (holding)**  
-- Baixa documentos (Boleto, NFSe, Faturamento e Funcionários)  
-- Unifica PDFs  
-- Gera **Output_WABA.xlsx** pronto para importação
+- Centraliza todos os documentos por **cliente lógico**  
+- Baixa PDFs (Boleto, NFSe, Faturamento e Funcionários)  
+- Unifica tudo em **um único PDF por cliente**  
+- Gera **Output_WABA.xlsx** pronto para uso
 """)
 
-# -----------------------------------
+# -------------------------------------------------
 # FUNÇÕES AUXILIARES
-# -----------------------------------
+# -------------------------------------------------
 def baixar_pdf(url, destino):
     try:
-        r = requests.get(url, timeout=15)
+        r = requests.get(url, timeout=20)
         r.raise_for_status()
         destino.write_bytes(r.content)
         return True
     except Exception:
         return False
 
-def formatar_valor(valor):
-    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+def chave_centralizacao(row):
+    """
+    Define a chave lógica de centralização.
+    Ordem de prioridade:
+    1. Telefone
+    2. ID_Cliente
+    3. CNPJ
+    4. Índice da linha
+    """
+    if "Telefone" in row and pd.notna(row["Telefone"]):
+        return f"TEL_{str(row['Telefone']).strip()}"
+    if "ID_Cliente" in row and pd.notna(row["ID_Cliente"]):
+        return f"ID_{str(row['ID_Cliente']).strip()}"
+    if "CNPJ" in row and pd.notna(row["CNPJ"]):
+        return f"CNPJ_{str(row['CNPJ']).strip()}"
+    return f"LINHA_{row.name}"
 
-def tratar_data(datas):
-    datas_unicas = set(datas)
-    if len(datas_unicas) == 1:
-        return datas_unicas.pop().strftime("%d/%m/%Y")
-    return "datas variadas"
-
-# -----------------------------------
-# COLUNAS DE PDF (PLANILHA REAL)
-# -----------------------------------
+# -------------------------------------------------
+# COLUNAS DE DOCUMENTOS (PLANILHA REAL)
+# -------------------------------------------------
 COLUNAS_PDF = [
     "Boleto PDF",
     "Nfse PDF",
@@ -49,83 +63,89 @@ COLUNAS_PDF = [
     "Funcionários PDF"
 ]
 
-# -----------------------------------
-# UPLOAD
-# -----------------------------------
-arquivo = st.file_uploader("📤 Envie a planilha (Excel)", type=["xlsx"])
+# -------------------------------------------------
+# UPLOAD DO ARQUIVO
+# -------------------------------------------------
+arquivo = st.file_uploader(
+    "📤 Envie a planilha do ERP (Excel)",
+    type=["xlsx"]
+)
 
 if arquivo:
     df = pd.read_excel(arquivo)
     st.success("Arquivo carregado com sucesso!")
 
-    st.subheader("🔍 Prévia dos Dados")
+    st.subheader("🔍 Prévia da Planilha")
     st.dataframe(df.head())
 
-    # Validação das colunas obrigatórias
-    obrigatorias = [
-        "Telefone",
-        "Valor Atualizado",
-        "Data Vencimento"
-    ] + COLUNAS_PDF
-
-    faltantes = [c for c in obrigatorias if c not in df.columns]
-    if faltantes:
-        st.error(f"Colunas ausentes no arquivo: {faltantes}")
+    # Validação mínima: ao menos uma coluna de PDF deve existir
+    colunas_presentes = [c for c in COLUNAS_PDF if c in df.columns]
+    if not colunas_presentes:
+        st.error(
+            "Nenhuma coluna de documentos encontrada. "
+            "Esperado ao menos uma das colunas:\n"
+            f"{COLUNAS_PDF}"
+        )
         st.stop()
 
-    if st.button("🚀 Processar Unificação"):
-        with st.spinner("Processando dados e documentos..."):
+    # -------------------------------------------------
+    # BOTÃO DE PROCESSAMENTO
+    # -------------------------------------------------
+    if st.button("🚀 Centralizar e Unificar Documentos"):
+        with st.spinner("Processando documentos..."):
 
             with tempfile.TemporaryDirectory() as tmpdir:
                 pdf_dir = Path(tmpdir)
-                saida = []
+                resultados = []
 
-                # SUPER-AGRUPAMENTO POR TELEFONE
-                for telefone, grupo in df.groupby("Telefone"):
+                # Criação da chave de centralização
+                df["CHAVE_CENTRAL"] = df.apply(chave_centralizacao, axis=1)
 
-                    valor_total = grupo["Valor Atualizado"].sum()
-                    datas = pd.to_datetime(grupo["Data Vencimento"])
-                    data_saida = tratar_data(datas)
+                # Agrupamento centralizado
+                for chave, grupo in df.groupby("CHAVE_CENTRAL"):
 
-                    pdfs = []
+                    pdfs_cliente = []
 
                     for _, row in grupo.iterrows():
-                        for col in COLUNAS_PDF:
+                        for col in colunas_presentes:
                             link = row[col]
                             if pd.notna(link):
-                                nome_pdf = f"{telefone}_{len(pdfs)}.pdf"
+                                nome_pdf = f"{chave}_{len(pdfs_cliente)}.pdf"
                                 caminho = pdf_dir / nome_pdf
                                 if baixar_pdf(link, caminho):
-                                    pdfs.append(caminho)
+                                    pdfs_cliente.append(caminho)
 
-                    # Merge PDFs
-                    pdf_final = pdf_dir / f"{telefone}_unificado.pdf"
-                    if pdfs:
+                    # Merge dos PDFs
+                    pdf_final = pdf_dir / f"{chave}_UNIFICADO.pdf"
+
+                    if pdfs_cliente:
                         merger = PdfMerger()
-                        for p in pdfs:
-                            merger.append(str(p))
+                        for pdf in pdfs_cliente:
+                            merger.append(str(pdf))
                         merger.write(str(pdf_final))
                         merger.close()
 
-                    saida.append({
-                        "telefone": telefone,
-                        "{{1}}": formatar_valor(valor_total),
-                        "{{3}}": data_saida,
-                        "arquivo_pdf": str(pdf_final) if pdfs else ""
+                    resultados.append({
+                        "chave_cliente": chave,
+                        "qtd_documentos": len(pdfs_cliente),
+                        "arquivo_pdf": str(pdf_final) if pdfs_cliente else ""
                     })
 
-                df_saida = pd.DataFrame(saida)
+                # -------------------------------------------------
+                # OUTPUT FINAL
+                # -------------------------------------------------
+                df_saida = pd.DataFrame(resultados)
 
                 output_excel = pdf_dir / "Output_WABA.xlsx"
                 df_saida.to_excel(output_excel, index=False)
 
-                st.success("✅ Processamento concluído!")
+                st.success("✅ Centralização concluída com sucesso!")
 
-                # DOWNLOAD
+                # DOWNLOAD DO EXCEL
                 with open(output_excel, "rb") as f:
                     st.download_button(
-                        "📥 Baixar Output_WABA.xlsx",
-                        f,
+                        label="📥 Baixar Output_WABA.xlsx",
+                        data=f,
                         file_name="Output_WABA.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
