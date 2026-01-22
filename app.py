@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import requests
 from pathlib import Path
-from PyPDF2 import PdfMerger
+from PyPDF2 import PdfMerger, PdfReader
 import tempfile
 
 # -------------------------------------------------
@@ -18,10 +18,10 @@ st.title("📑 Centralização e Unificação de Documentos")
 st.markdown("""
 Este aplicativo:
 - Lê a planilha de Contas a Receber do ERP  
-- Centraliza todos os documentos por **cliente lógico**  
+- Centraliza documentos por **cliente lógico**  
 - Baixa PDFs (Boleto, NFSe, Faturamento e Funcionários)  
 - Unifica tudo em **um único PDF por cliente**  
-- Gera **Output_WABA.xlsx** pronto para uso
+- Gera **Output_WABA.xlsx**
 """)
 
 # -------------------------------------------------
@@ -37,14 +37,6 @@ def baixar_pdf(url, destino):
         return False
 
 def chave_centralizacao(row):
-    """
-    Define a chave lógica de centralização.
-    Ordem de prioridade:
-    1. Telefone
-    2. ID_Cliente
-    3. CNPJ
-    4. Índice da linha
-    """
     if "Telefone" in row and pd.notna(row["Telefone"]):
         return f"TEL_{str(row['Telefone']).strip()}"
     if "ID_Cliente" in row and pd.notna(row["ID_Cliente"]):
@@ -53,8 +45,19 @@ def chave_centralizacao(row):
         return f"CNPJ_{str(row['CNPJ']).strip()}"
     return f"LINHA_{row.name}"
 
+def anexar_pdf_seguro(merger, caminho_pdf):
+    """
+    Anexa PDFs ignorando outlines/metadados quebrados
+    """
+    try:
+        reader = PdfReader(str(caminho_pdf), strict=False)
+        merger.append(reader, import_outline=False)
+        return True
+    except Exception:
+        return False
+
 # -------------------------------------------------
-# COLUNAS DE DOCUMENTOS (PLANILHA REAL)
+# COLUNAS DE DOCUMENTOS
 # -------------------------------------------------
 COLUNAS_PDF = [
     "Boleto PDF",
@@ -64,7 +67,7 @@ COLUNAS_PDF = [
 ]
 
 # -------------------------------------------------
-# UPLOAD DO ARQUIVO
+# UPLOAD
 # -------------------------------------------------
 arquivo = st.file_uploader(
     "📤 Envie a planilha do ERP (Excel)",
@@ -78,18 +81,16 @@ if arquivo:
     st.subheader("🔍 Prévia da Planilha")
     st.dataframe(df.head())
 
-    # Validação mínima: ao menos uma coluna de PDF deve existir
     colunas_presentes = [c for c in COLUNAS_PDF if c in df.columns]
     if not colunas_presentes:
         st.error(
-            "Nenhuma coluna de documentos encontrada. "
-            "Esperado ao menos uma das colunas:\n"
-            f"{COLUNAS_PDF}"
+            "Nenhuma coluna de documentos encontrada.\n"
+            f"Esperado ao menos uma destas colunas:\n{COLUNAS_PDF}"
         )
         st.stop()
 
     # -------------------------------------------------
-    # BOTÃO DE PROCESSAMENTO
+    # PROCESSAMENTO
     # -------------------------------------------------
     if st.button("🚀 Centralizar e Unificar Documentos"):
         with st.spinner("Processando documentos..."):
@@ -98,10 +99,8 @@ if arquivo:
                 pdf_dir = Path(tmpdir)
                 resultados = []
 
-                # Criação da chave de centralização
                 df["CHAVE_CENTRAL"] = df.apply(chave_centralizacao, axis=1)
 
-                # Agrupamento centralizado
                 for chave, grupo in df.groupby("CHAVE_CENTRAL"):
 
                     pdfs_cliente = []
@@ -115,37 +114,34 @@ if arquivo:
                                 if baixar_pdf(link, caminho):
                                     pdfs_cliente.append(caminho)
 
-                    # Merge dos PDFs
                     pdf_final = pdf_dir / f"{chave}_UNIFICADO.pdf"
 
+                    anexados = 0
                     if pdfs_cliente:
                         merger = PdfMerger()
                         for pdf in pdfs_cliente:
-                            merger.append(str(pdf))
-                        merger.write(str(pdf_final))
+                            if anexar_pdf_seguro(merger, pdf):
+                                anexados += 1
+                        if anexados > 0:
+                            merger.write(str(pdf_final))
                         merger.close()
 
                     resultados.append({
                         "chave_cliente": chave,
-                        "qtd_documentos": len(pdfs_cliente),
-                        "arquivo_pdf": str(pdf_final) if pdfs_cliente else ""
+                        "documentos_anexados": anexados,
+                        "arquivo_pdf": str(pdf_final) if anexados > 0 else ""
                     })
 
-                # -------------------------------------------------
-                # OUTPUT FINAL
-                # -------------------------------------------------
                 df_saida = pd.DataFrame(resultados)
-
                 output_excel = pdf_dir / "Output_WABA.xlsx"
                 df_saida.to_excel(output_excel, index=False)
 
                 st.success("✅ Centralização concluída com sucesso!")
 
-                # DOWNLOAD DO EXCEL
                 with open(output_excel, "rb") as f:
                     st.download_button(
-                        label="📥 Baixar Output_WABA.xlsx",
-                        data=f,
+                        "📥 Baixar Output_WABA.xlsx",
+                        f,
                         file_name="Output_WABA.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
