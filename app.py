@@ -3,27 +3,24 @@ import pandas as pd
 import requests
 from pathlib import Path
 from PyPDF2 import PdfMerger
-from datetime import datetime
 import tempfile
-import os
 
 st.set_page_config(page_title="Unificação de Cobranças", layout="wide")
 
-st.title("📑 Unificação de PDFs e Geração WABA")
+st.title("📑 Unificação de PDFs – Contas a Receber")
 
 st.markdown("""
-Este aplicativo:
-- Lê planilhas exportadas do ERP  
-- Agrupa cobranças por **telefone (holding)**  
-- Soma valores  
-- Trata datas de vencimento  
-- Baixa e unifica PDFs  
-- Gera **Output_WABA.xlsx**
+Este app:
+- Lê a planilha de Contas a Receber do ERP  
+- Agrupa clientes por **Telefone (holding)**  
+- Baixa documentos (Boleto, NFSe, Faturamento e Funcionários)  
+- Unifica PDFs  
+- Gera **Output_WABA.xlsx** pronto para importação
 """)
 
-# -----------------------------
+# -----------------------------------
 # FUNÇÕES AUXILIARES
-# -----------------------------
+# -----------------------------------
 def baixar_pdf(url, destino):
     try:
         r = requests.get(url, timeout=15)
@@ -42,55 +39,71 @@ def tratar_data(datas):
         return datas_unicas.pop().strftime("%d/%m/%Y")
     return "datas variadas"
 
-# -----------------------------
-# UPLOAD DO ARQUIVO
-# -----------------------------
-arquivo = st.file_uploader("📤 Envie o arquivo do ERP (Excel)", type=["xlsx"])
+# -----------------------------------
+# COLUNAS DE PDF (PLANILHA REAL)
+# -----------------------------------
+COLUNAS_PDF = [
+    "Boleto PDF",
+    "Nfse PDF",
+    "Faturamento PDF",
+    "Funcionários PDF"
+]
+
+# -----------------------------------
+# UPLOAD
+# -----------------------------------
+arquivo = st.file_uploader("📤 Envie a planilha (Excel)", type=["xlsx"])
 
 if arquivo:
     df = pd.read_excel(arquivo)
     st.success("Arquivo carregado com sucesso!")
 
-    st.subheader("📊 Prévia dos Dados")
+    st.subheader("🔍 Prévia dos Dados")
     st.dataframe(df.head())
 
-    link_cols = [c for c in df.columns if c.startswith("Link_")]
+    # Validação das colunas obrigatórias
+    obrigatorias = [
+        "Telefone",
+        "Valor Atualizado",
+        "Data Vencimento"
+    ] + COLUNAS_PDF
 
-    if not link_cols:
-        st.error("Nenhuma coluna 'Link_' encontrada.")
+    faltantes = [c for c in obrigatorias if c not in df.columns]
+    if faltantes:
+        st.error(f"Colunas ausentes no arquivo: {faltantes}")
         st.stop()
 
-    if st.button("🚀 Processar Cobranças"):
-        with st.spinner("Processando dados e PDFs..."):
+    if st.button("🚀 Processar Unificação"):
+        with st.spinner("Processando dados e documentos..."):
 
             with tempfile.TemporaryDirectory() as tmpdir:
                 pdf_dir = Path(tmpdir)
-
                 saida = []
 
-                for telefone, grupo_tel in df.groupby("Telefone"):
+                # SUPER-AGRUPAMENTO POR TELEFONE
+                for telefone, grupo in df.groupby("Telefone"):
 
-                    valor_total = grupo_tel["Valor_Atualizado"].sum()
-                    datas = pd.to_datetime(grupo_tel["Data_Vencimento"])
+                    valor_total = grupo["Valor Atualizado"].sum()
+                    datas = pd.to_datetime(grupo["Data Vencimento"])
                     data_saida = tratar_data(datas)
 
-                    pdfs_cliente = []
+                    pdfs = []
 
-                    for _, row in grupo_tel.iterrows():
-                        for col in link_cols:
+                    for _, row in grupo.iterrows():
+                        for col in COLUNAS_PDF:
                             link = row[col]
                             if pd.notna(link):
-                                nome_pdf = f"{telefone}_{len(pdfs_cliente)}.pdf"
-                                caminho_pdf = pdf_dir / nome_pdf
-                                if baixar_pdf(link, caminho_pdf):
-                                    pdfs_cliente.append(caminho_pdf)
+                                nome_pdf = f"{telefone}_{len(pdfs)}.pdf"
+                                caminho = pdf_dir / nome_pdf
+                                if baixar_pdf(link, caminho):
+                                    pdfs.append(caminho)
 
-                    # Merge dos PDFs
+                    # Merge PDFs
                     pdf_final = pdf_dir / f"{telefone}_unificado.pdf"
-                    if pdfs_cliente:
+                    if pdfs:
                         merger = PdfMerger()
-                        for pdf in pdfs_cliente:
-                            merger.append(str(pdf))
+                        for p in pdfs:
+                            merger.append(str(p))
                         merger.write(str(pdf_final))
                         merger.close()
 
@@ -98,7 +111,7 @@ if arquivo:
                         "telefone": telefone,
                         "{{1}}": formatar_valor(valor_total),
                         "{{3}}": data_saida,
-                        "arquivo_pdf": str(pdf_final) if pdfs_cliente else ""
+                        "arquivo_pdf": str(pdf_final) if pdfs else ""
                     })
 
                 df_saida = pd.DataFrame(saida)
@@ -108,11 +121,11 @@ if arquivo:
 
                 st.success("✅ Processamento concluído!")
 
-                # DOWNLOAD DO EXCEL
+                # DOWNLOAD
                 with open(output_excel, "rb") as f:
                     st.download_button(
-                        label="📥 Baixar Output_WABA.xlsx",
-                        data=f,
+                        "📥 Baixar Output_WABA.xlsx",
+                        f,
                         file_name="Output_WABA.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
